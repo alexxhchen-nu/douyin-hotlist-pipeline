@@ -1,0 +1,11 @@
+name = "douyin-dl"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+
+routes = [
+  { pattern = "dl.xiaohanchen.cc", custom_domain = true }
+]
+
+[[r2_buckets]]
+binding = "R2"
+bucket_name = "pi-pipeline-test"

@@ -1,0 +1,39 @@
+# Environment
+.env
+.env.local
+
+# Credentials & state
+douyin_state.json
+*.json.state
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Playwright
+chrome_profile/
+*.pkl
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Node (Worker)
+worker/node_modules/
+worker/.wrangler/
+worker/dist/
+
+# Logs
+*.log
