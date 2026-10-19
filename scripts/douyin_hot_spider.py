@@ -5,13 +5,18 @@
   所以这里用 AsyncStealthySession(record_requests=True) 开着真实浏览器加载页面，
   然后从 session.network 历史里捞 API 的 JSON 响应解析，不碰 X-Bogus/a_bogus 签名。
 
-  2026-10 实测的两条硬事实：
-  1) 热榜 API `aweme/v1/web/hot/search/list/` 匿名可用，但数据字段已改名 word_list
-     （不是 hot_board_list），且匿名时 hot_value/view_count 被清零 —— 要真实热度需登录 Cookie。
-  2) 搜索页 `/search/{kw}?type=video` 对匿名会话直接返回「验证码中间页」，不调搜索 API，
+  2026-10-20 实测的硬事实：
+  1) 热榜关键词接口 `aweme/v1/web/hot/search/list/` 已登录门禁：匿名会话返回 200 但
+     Content-Length: 0（curl/浏览器/Scrapling 一致），页面渲染出空榜单——连 Firecrawl
+     云端浏览器也拿不到（现有 hotlist.py 已 0 条）。数据字段为 data.word_list。
+  2) 热榜视频流 `aweme/v1/web/channel/hotspot`（channel_id=99）匿名可用，返回
+     aweme_list（每条是完整 aweme 对象），是本蜘蛛匿名时唯一的数据源。
+  3) 搜索页 `/search/{kw}?type=video` 对匿名会话直接返回「验证码中间页」，不调搜索 API，
      必须带登录态 Cookie（含 sessionid）。登录后从 `aweme/v1/web/general/search/single/`
      网络响应取视频；万一接口改版改走 RSC 流，则兜底解析页面 HTML 里的
      self.__pace_f.push(...) flight 段。
+  4) 抖音 JS 会对接口加 a_bogus/msToken 签名（页面自动生成，无需手工处理）；
+     网络历史里能直接拿到带签名的完整请求和 JSON 响应。
 
 登录态：
   默认自动读 .env 里的 DOUYIN_HOT_COOKIE（项目 login_export.py 从 BitBrowser 导出的格式），
@@ -43,8 +48,10 @@ HOT_URL = "https://www.douyin.com/hot"
 SEARCH_URL = "https://www.douyin.com/search/{kw}?type=video"
 
 HOT_API_RE = re.compile(r"aweme/v1/web/hot/(search|detail)/list")
+HOT_FEED_API_RE = re.compile(r"aweme/v1/web/channel/hotspot")
 SEARCH_API_RE = re.compile(r"aweme/v1/web/(general/)?search/single")
 CAPTCHA_TITLE = "验证码中间页"
+HOT_FEED_KEY = "__hot_feed__"  # 匿名可用的热榜视频流，keyword 占位
 
 LOGIN_COOKIE_MARKERS = ("sessionid", "sid_guard", "sid_tt", "uid_tt")
 
@@ -89,16 +96,45 @@ def _num(v, default=None):
     return default
 
 
-def _walk_aweme(obj, out):
-    """递归收集带 aweme_id+desc 的对象（RSC flight 里的 aweme 对象）。"""
+def _walk(obj, out, pred):
+    """递归收集满足 pred 的 dict（用于 RSC flight 数据里挖 aweme/热榜条目）。"""
     if isinstance(obj, dict):
-        if isinstance(obj.get("aweme_id"), str) and "desc" in obj:
+        if pred(obj):
             out.append(obj)
         for v in obj.values():
-            _walk_aweme(v, out)
+            _walk(v, out, pred)
     elif isinstance(obj, list):
         for v in obj:
-            _walk_aweme(v, out)
+            _walk(v, out, pred)
+
+
+def _rsc_objects(text: str, pred) -> list[dict]:
+    """从页面 HTML 的 self.__pace_f.push flight 段里按谓词挖对象，去重返回。"""
+    found = []
+    for m in re.finditer(r'self\.__pace_f\.push\(\[(\d+),\s*("(?:[^"\\]|\\.)*")\]\)', text):
+        try:
+            seg = json.loads(m.group(2))
+        except Exception:
+            continue
+        if not isinstance(seg, str):
+            continue
+        # RSC flight 前缀形如 "1:I{...}" 或 "2:J0,{...}"，从第一个 { 或 [ 切起
+        start = min(i for i in (seg.find("{"), seg.find("[")) if i != -1) if ("{" in seg or "[" in seg) else -1
+        if start == -1:
+            continue
+        try:
+            data = json.loads(seg[start:])
+        except Exception:
+            continue
+        _walk(data, found, pred)
+    seen, out = set(), []
+    for d in found:
+        key = json.dumps(d, ensure_ascii=False, sort_keys=True)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(d)
+    return out
 
 
 class DouyinHotSpider(Spider):
@@ -217,11 +253,19 @@ class DouyinHotSpider(Spider):
 
     # ---------- 解析热榜 ----------
 
-    def _parse_hotlist(self) -> list[dict]:
-        """从记录的 API 响应里找热榜 JSON，取 Top N 关键词。
+    @staticmethod
+    def _is_hot_entry(obj: dict) -> bool:
+        return isinstance(obj.get("word"), str) and (
+            "hot_value" in obj or "view_count" in obj or "position" in obj
+        )
 
-        数据字段按 2026-10 实测是 data.word_list；hot_board_list 是旧版字段，
-        再不行就泛化扫描任何含 word 的对象列表。
+    def _parse_hotlist(self, page_doc_text: str = "") -> list[dict]:
+        """解析 Top N 热榜关键词。
+
+        数据源按可靠性排序：
+        1) 网络历史里 hot/search/list 响应的 data.word_list（需登录态，2026-10 实测匿名为空）；
+        2) 页面文档 RSC flight 段里带 word 字段的对象（登录后若改走 RSC 流）；
+        3) 泛化扫描：任何含 word 的对象列表。
         """
         candidates = []
         for url, data in self._recorded_json():
@@ -235,14 +279,19 @@ class DouyinHotSpider(Spider):
                     break
             else:
                 for key, val in inner.items():
-                    if isinstance(val, list) and val and isinstance(val[0], dict):
-                        if "word" in val[0] and any(k in val[0] for k in ("position", "hot_value", "view_count")):
-                            candidates.append((url, val))
-                            break
-        if not candidates:
-            return []
+                    if (
+                        isinstance(val, list) and val
+                        and isinstance(val[0], dict) and self._is_hot_entry(val[0])
+                    ):
+                        candidates.append((url, val))
+                        break
+        if candidates:
+            board = next((b for u, b in candidates if HOT_API_RE.search(u)), candidates[0][1])
+        elif page_doc_text:
+            board = _rsc_objects(page_doc_text, self._is_hot_entry)
+        else:
+            board = []
 
-        board = next((b for u, b in candidates if HOT_API_RE.search(u)), candidates[0][1])
         rows = []
         for it in board:
             if not isinstance(it, dict) or not it.get("word"):
@@ -263,6 +312,29 @@ class DouyinHotSpider(Spider):
             })
         rows.sort(key=lambda r: r["rank"])
         return rows[: self.top_keywords]
+
+    def _parse_hot_feed(self, limit: int = 10) -> list[dict]:
+        """解析热榜视频流（channel/hotspot）：匿名也可用，取 Top N 条视频。
+
+        keyword 固定为 HOT_FEED_KEY，与每词搜索结果区分。
+        """
+        rows = []
+        for url, data in self._recorded_json():
+            if not HOT_FEED_API_RE.search(url):
+                continue
+            for item in data.get("aweme_list") or []:
+                if not isinstance(item, dict):
+                    continue
+                row = self._extract_video(item, HOT_FEED_KEY)
+                if not row or row["aweme_id"] in {r["aweme_id"] for r in rows}:
+                    continue
+                row["video_rank"] = len(rows) + 1
+                rows.append(row)
+                if len(rows) >= limit:
+                    break
+            if len(rows) >= limit:
+                break
+        return rows
 
     # ---------- 解析视频 ----------
 
