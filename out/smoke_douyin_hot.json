@@ -1,0 +1,35 @@
+[
+  {
+    "type": "hot",
+    "rank": 1,
+    "title": "前三季度我国GDP同比增长4.6% ​",
+    "word": "前三季度我国GDP同比增长4.6% ​",
+    "hot_value": 0,
+    "hot_value_k": 0.0,
+    "label": 0,
+    "sentence_id": "2702131",
+    "fetched_at": "2026-10-20T04:19:32"
+  },
+  {
+    "type": "hot",
+    "rank": 2,
+    "title": "法国骚乱抗议者cos动漫角色示威",
+    "word": "法国骚乱抗议者cos动漫角色示威",
+    "hot_value": 0,
+    "hot_value_k": 0.0,
+    "label": 0,
+    "sentence_id": "2702197",
+    "fetched_at": "2026-10-20T04:19:32"
+  },
+  {
+    "type": "hot",
+    "rank": 3,
+    "title": "外交部回应菲方召见中国大使",
+    "word": "外交部回应菲方召见中国大使",
+    "hot_value": 0,
+    "hot_value_k": 0.0,
+    "label": 0,
+    "sentence_id": "2702828",
+    "fetched_at": "2026-10-20T04:19:32"
+  }
+]
