@@ -367,33 +367,8 @@ class DouyinHotSpider(Spider):
         }
 
     @staticmethod
-    def _rsc_aweme_objects(text: str) -> list[dict]:
-        """从页面 HTML 的 self.__pace_f.push flight 段里挖 aweme 对象（接口改走 RSC 时兜底）。"""
-        found = []
-        for m in re.finditer(r'self\.__pace_f\.push\(\[(\d+),\s*("(?:[^"\\]|\\.)*")\]\)', text):
-            try:
-                seg = json.loads(m.group(2))
-            except Exception:
-                continue
-            if not isinstance(seg, str):
-                continue
-            # RSC flight 前缀形如 "1:I{...}" 或 "2:J0,{...}"，从第一个 { 或 [ 切起
-            start = min(i for i in (seg.find("{"), seg.find("[")) if i != -1) if ("{" in seg or "[" in seg) else -1
-            if start == -1:
-                continue
-            try:
-                data = json.loads(seg[start:])
-            except Exception:
-                continue
-            _walk_aweme(data, found)
-        seen, out = set(), []
-        for d in found:
-            aid = d.get("aweme_id")
-            if aid in seen:
-                continue
-            seen.add(aid)
-            out.append(d)
-        return out
+    def _is_aweme(obj: dict) -> bool:
+        return isinstance(obj.get("aweme_id"), str) and "desc" in obj
 
     def _parse_videos(self, keyword: str, page_doc_text: str) -> list[dict]:
         """从记录的搜索 API 响应 + 页面 RSC 里捞该关键词的视频，取 Top M 条。"""
@@ -413,7 +388,7 @@ class DouyinHotSpider(Spider):
             if len({id(d) for d in all_search}) == 1 and isinstance((all_search[0] or {}).get("data"), list):
                 api_items = all_search[0]["data"]
 
-        rsc_items = self._rsc_aweme_objects(page_doc_text)
+        rsc_items = _rsc_objects(page_doc_text, self._is_aweme)
 
         seen, rows = set(), []
         for item in list(api_items) + list(rsc_items):
@@ -435,19 +410,28 @@ class DouyinHotSpider(Spider):
     # ---------- 回调 ----------
 
     async def parse(self, response: Response):
-        """热榜页：解析 Top N 关键词，然后为每个关键词派发搜索请求。"""
+        """热榜页：解析 Top N 关键词，然后为每个关键词派发搜索请求。
+
+        无登录态时热榜关键词为空（2026-10 起抖音对匿名返回空榜单），
+        此时仍会产出 channel/hotspot 的热榜视频流作为兜底数据。
+        """
         self.logger.info("热榜页加载完成: %s (status=%s)", response.url, response.status)
-        hot = self._parse_hotlist()
-        if not hot:
-            self.logger.error("没从网络历史里解析到热榜数据（可能被验证码拦截或 API 路径变了）")
-            return
+        doc_text = response.body.decode("utf-8", errors="ignore")
+        hot = self._parse_hotlist(doc_text)
 
         if not self._cookies:
-            self.logger.warning("未提供 Cookie：热榜热度值会被清零；搜索视频会被验证码墙拦截")
+            self.logger.warning("未提供 Cookie：热榜关键词/搜索视频都会被风控拦截（匿名拿不到）")
         elif not self._has_login_cookies():
             self.logger.warning(
-                "Cookie 里没有 sessionid/sid_guard 等登录态标记，搜索视频大概率仍会被验证码拦截。"
+                "Cookie 里没有 sessionid/sid_guard 等登录态标记，热榜关键词和搜索视频大概率拿不到。"
                 "用 login_export.py 从 BitBrowser 导出登录 Cookie 写入 .env 的 DOUYIN_HOT_COOKIE"
+            )
+
+        if not hot:
+            self.logger.warning(
+                "热榜关键词为空：2026-10 起抖音对未登录会话返回空榜单"
+                "（hot/search/list 空响应，Firecrawl 同样 0 条）。"
+                "需要登录态 Cookie 才能拿到关键词列表；本次只输出热榜视频流"
             )
 
         self.logger.info("解析到 %d 个热榜关键词", len(hot))
@@ -462,6 +446,12 @@ class DouyinHotSpider(Spider):
                 callback=self.parse_videos,
                 meta={"keyword": kw, "hot_rank": item["rank"]},
             )
+
+        # 兜底数据源：热榜视频流（channel/hotspot）匿名可用，取 Top N
+        feed = self._parse_hot_feed(limit=self.top_videos or 10)
+        self.logger.info("热榜视频流解析到 %d 条（匿名兜底）", len(feed))
+        for item in feed:
+            yield item
 
     async def parse_videos(self, response: Response):
         """搜索页：从网络历史 + 页面 RSC 里捞该关键词的视频，取 Top M 条。"""
