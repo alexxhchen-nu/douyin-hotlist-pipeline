@@ -1,2 +1,15 @@
+[project]
+name = "douyin-hotlist-pipeline"
+version = "0.1.0"
+requires-python = ">=3.9"
+dependencies = [
+    "playwright>=1.47",
+    "boto3>=1.34",
+    "requests>=2.31",
+    "firecrawl-py>=4.53.2",
+    "scrapling[all]>=0.5",
+    "watchdog>=6.0.0",
+]
+
 [tool.marimo.runtime]
 watcher_on_save = "autorun"
